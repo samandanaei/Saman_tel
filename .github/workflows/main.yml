@@ -1,4 +1,4 @@
-name: Telegram File Downloader
+name: Telegram File Downloader (با پارت‌بندی خودکار)
 
 on:
   workflow_dispatch:
@@ -7,9 +7,14 @@ on:
         description: 'لینک پیام تلگرام را اینجا قرار دهید'
         required: true
         type: string
+      max_size_mb:
+        description: 'حداکثر حجم هر پارت به مگابایت (پیشفرض 80)'
+        required: false
+        default: '80'
+        type: string
 
 jobs:
-  download:
+  download-and-process:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -21,38 +26,76 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip
+          sudo apt-get install -y unzip zip
           pip install yt-dlp
 
-      # STEP جدید و دقیق‌تر برای دانلود با نام ثابت و بررسی خطا
       - name: Download file from Telegram
+        id: download
         run: |
-          # دانلود با یک نام ثابت (file_to_download) برای جلوگیری از پیچیدگی
-          yt-dlp --no-playlist -o "downloads/file_to_download.%(ext)s" "${{ github.event.inputs.tg_link }}"
+          yt-dlp --no-playlist -o "downloads/original_file.%(ext)s" "${{ github.event.inputs.tg_link }}"
           
-          # بررسی می‌کند که آیا فایلی دانلود شده است یا خیر
-          if [ -z "$(ls -A downloads 2>/dev/null)" ]; then
-            echo "ERROR: No file was downloaded from the provided link!"
-            exit 1
-          else
-            echo "Download successful. Files in downloads folder:"
-            ls -la downloads/
-          fi
+          # پیدا کردن نام فایل دانلود شده
+          cd downloads
+          ORIGINAL_FILE=$(ls -1 | head -n 1)
+          echo "ORIGINAL_FILE=$ORIGINAL_FILE" >> $GITHUB_ENV
+          cd ..
+          
+          # محاسبه حجم فایل به مگابایت
+          FILE_SIZE_BYTES=$(stat -c%s "downloads/$ORIGINAL_FILE")
+          FILE_SIZE_MB=$((FILE_SIZE_BYTES / 1024 / 1024))
+          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
+          echo "File size: $FILE_SIZE_MB MB"
+
+      - name: Split and zip if file is large
+        if: env.FILE_SIZE_MB > 90
+        run: |
+          cd downloads
+          ORIGINAL="${{ env.ORIGINAL_FILE }}"
+          BASE_NAME="${ORIGINAL%.*}"
+          EXTENSION="${ORIGINAL##*.}"
+          
+          # ایجاد پوشه برای فایل‌های پارت شده
+          mkdir -p split_parts
+          
+          # پارت بندی فایل (هر پارت به حجم مشخص شده)
+          split -b "${{ github.event.inputs.max_size_mb }}M" "$ORIGINAL" "split_parts/${BASE_NAME}.part."
+          
+          # تغییر نام فایل‌های پارت شده به فرمت مناسب
+          cd split_parts
+          COUNTER=1
+          for PART in ${BASE_NAME}.part.*; do
+            mv "$PART" "${BASE_NAME}.part${COUNTER}"
+            COUNTER=$((COUNTER + 1))
+          done
+          
+          # ایجاد فایل ZIP از پارت‌ها
+          zip -r "../${BASE_NAME}_split_parts.zip" .
+          cd ..
+          
+          # حذف فایل اصلی و پوشه موقت
+          rm "$ORIGINAL"
+          rm -rf split_parts
+          
+          cd ..
+
+      - name: Rename file if no split needed
+        if: env.FILE_SIZE_MB <= 90
+        run: |
+          cd downloads
+          ORIGINAL="${{ env.ORIGINAL_FILE }}"
+          # فقط فایل را به یک نام استاندارد تغییر نام بده
+          mv "$ORIGINAL" "downloaded_file.zip" 2>/dev/null || mv "$ORIGINAL" "downloaded_file"
+          cd ..
 
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # اضافه کردن هر چیزی که در پوشه downloads است
           git add downloads/
-          
-          # اگر تغییری وجود داشت، commit و push کن
           if [[ -n "$(git status --porcelain)" ]]; then
             git commit -m "Add downloaded file from Telegram"
             git push
-            echo "Files successfully committed and pushed to the repository."
           else
-            echo "No new file to commit. The downloads folder might be empty."
+            echo "No new file to commit."
             exit 1
           fi
