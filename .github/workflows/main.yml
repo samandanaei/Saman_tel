@@ -1,4 +1,4 @@
-name: Telegram File Downloader (با پارت‌بندی خودکار)
+name: Telegram File Downloader (نسخه نهایی با پارت بندی صحیح)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: 'لینک پیام تلگرام را اینجا قرار دهید'
         required: true
         type: string
-      max_size_mb:
+      part_size_mb:
         description: 'حداکثر حجم هر پارت به مگابایت (پیشفرض 80)'
         required: false
         default: '80'
@@ -21,80 +21,76 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create downloads directory
-        run: mkdir -p downloads
+        run: |
+          mkdir -p downloads
+          # پاک کردن فایل‌های قبلی (اختیاری)
+          rm -rf downloads/*
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip zip
+          sudo apt-get install -y unzip
           pip install yt-dlp
 
       - name: Download file from Telegram
         id: download
         run: |
-          yt-dlp --no-playlist -o "downloads/original_file.%(ext)s" "${{ github.event.inputs.tg_link }}"
+          # دانلود فایل با نام اصلی
+          yt-dlp --no-playlist -o "downloads/%(title)s.%(ext)s" "${{ github.event.inputs.tg_link }}"
           
-          # پیدا کردن نام فایل دانلود شده
+          # پیدا کردن فایل دانلود شده
           cd downloads
           ORIGINAL_FILE=$(ls -1 | head -n 1)
           echo "ORIGINAL_FILE=$ORIGINAL_FILE" >> $GITHUB_ENV
-          cd ..
           
-          # محاسبه حجم فایل به مگابایت
-          FILE_SIZE_BYTES=$(stat -c%s "downloads/$ORIGINAL_FILE")
+          # محاسبه حجم فایل به بایت و مگابایت
+          FILE_SIZE_BYTES=$(stat -c%s "$ORIGINAL_FILE")
           FILE_SIZE_MB=$((FILE_SIZE_BYTES / 1024 / 1024))
           echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
-          echo "File size: $FILE_SIZE_MB MB"
+          echo "Original file: $ORIGINAL_FILE"
+          echo "Size: $FILE_SIZE_MB MB"
+          cd ..
 
-      - name: Split and zip if file is large
+      - name: Split large file into parts
         if: env.FILE_SIZE_MB > 90
         run: |
           cd downloads
           ORIGINAL="${{ env.ORIGINAL_FILE }}"
+          PART_SIZE="${{ github.event.inputs.part_size_mb }}M"
+          
+          # دریافت نام بدون پسوند
           BASE_NAME="${ORIGINAL%.*}"
-          EXTENSION="${ORIGINAL##*.}"
           
-          # ایجاد پوشه برای فایل‌های پارت شده
-          mkdir -p split_parts
+          # پارت بندی فایل با فرمت name.part001, name.part002, ...
+          split -d -a 3 -b "$PART_SIZE" "$ORIGINAL" "${BASE_NAME}.part"
           
-          # پارت بندی فایل (هر پارت به حجم مشخص شده)
-          split -b "${{ github.event.inputs.max_size_mb }}M" "$ORIGINAL" "split_parts/${BASE_NAME}.part."
-          
-          # تغییر نام فایل‌های پارت شده به فرمت مناسب
-          cd split_parts
-          COUNTER=1
-          for PART in ${BASE_NAME}.part.*; do
-            mv "$PART" "${BASE_NAME}.part${COUNTER}"
-            COUNTER=$((COUNTER + 1))
-          done
-          
-          # ایجاد فایل ZIP از پارت‌ها
-          zip -r "../${BASE_NAME}_split_parts.zip" .
-          cd ..
-          
-          # حذف فایل اصلی و پوشه موقت
+          # حذف فایل اصلی
           rm "$ORIGINAL"
-          rm -rf split_parts
           
+          # نمایش لیست فایل‌های ایجاد شده
+          echo "Created parts:"
+          ls -la ${BASE_NAME}.part*
           cd ..
 
-      - name: Rename file if no split needed
+      - name: Rename small files (no split needed)
         if: env.FILE_SIZE_MB <= 90
         run: |
           cd downloads
           ORIGINAL="${{ env.ORIGINAL_FILE }}"
-          # فقط فایل را به یک نام استاندارد تغییر نام بده
-          mv "$ORIGINAL" "downloaded_file.zip" 2>/dev/null || mv "$ORIGINAL" "downloaded_file"
+          # فقط تغییر نام به یک فرمت استاندارد
+          mv "$ORIGINAL" "downloaded_file" 2>/dev/null || true
           cd ..
 
-      - name: Commit and push changes
+      - name: Commit and push all files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/
+          
           if [[ -n "$(git status --porcelain)" ]]; then
-            git commit -m "Add downloaded file from Telegram"
+            git commit -m "Add downloaded file(s) from Telegram"
             git push
+            echo "Successfully committed and pushed files to repository."
           else
             echo "No new file to commit."
             exit 1
