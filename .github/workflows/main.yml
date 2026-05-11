@@ -3,55 +3,56 @@ name: Telegram File Downloader
 on:
   workflow_dispatch:
     inputs:
-      file_id:
-        description: 'شناسه فایل (file_id) را وارد کنید'
+      tg_link:
+        description: 'لینک پیام تلگرام را اینجا قرار دهید'
         required: true
-        default: ''
-        type: string
-      part_size_mb:
-        description: 'حداکثر حجم هر پارت (مگابایت) - پیشفرض 80'
-        required: false
-        default: '80'
         type: string
 
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Create downloads folder
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create downloads directory
         run: mkdir -p downloads
-      
-      - name: Download file using Bot API
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+
+      - name: Install dependencies
         run: |
-          FILE_ID="${{ github.event.inputs.file_id }}"
+          sudo apt-get update
+          sudo apt-get install -y unzip
+          pip install yt-dlp
+
+      # STEP جدید و دقیق‌تر برای دانلود با نام ثابت و بررسی خطا
+      - name: Download file from Telegram
+        run: |
+          # دانلود با یک نام ثابت (file_to_download) برای جلوگیری از پیچیدگی
+          yt-dlp --no-playlist -o "downloads/file_to_download.%(ext)s" "${{ github.event.inputs.tg_link }}"
           
-          echo "Downloading file with ID: $FILE_ID"
-          
-          # Get file path
-          RESPONSE=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${FILE_ID}")
-          echo "API Response: $RESPONSE"
-          
-          FILE_PATH=$(echo "$RESPONSE" | jq -r '.result.file_path')
-          
-          if [ "$FILE_PATH" = "null" ] || [ -z "$FILE_PATH" ]; then
-            echo "Error: Invalid file_id or bot cannot access this file"
+          # بررسی می‌کند که آیا فایلی دانلود شده است یا خیر
+          if [ -z "$(ls -A downloads 2>/dev/null)" ]; then
+            echo "ERROR: No file was downloaded from the provided link!"
             exit 1
+          else
+            echo "Download successful. Files in downloads folder:"
+            ls -la downloads/
           fi
-          
-          # Download the file
-          curl -L -o "downloads/$(basename "$FILE_PATH")" "https://api.telegram.org/file/bot${BOT_TOKEN}/${FILE_PATH}"
-          
-          echo "Download completed!"
-          ls -la downloads/
-      
-      - name: Commit and push
+
+      - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # اضافه کردن هر چیزی که در پوشه downloads است
           git add downloads/
-          git commit -m "Add downloaded file from Telegram" || echo "No changes to commit"
-          git push
+          
+          # اگر تغییری وجود داشت، commit و push کن
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git commit -m "Add downloaded file from Telegram"
+            git push
+            echo "Files successfully committed and pushed to the repository."
+          else
+            echo "No new file to commit. The downloads folder might be empty."
+            exit 1
+          fi
