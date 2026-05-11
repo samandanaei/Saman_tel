@@ -1,11 +1,12 @@
-    name: Telegram File Downloader (نسخه Bot API نهایی)
+name: Telegram File Downloader
 
 on:
   workflow_dispatch:
     inputs:
       file_id:
-        description: 'شناسه فایل (file_id) را که بات به شما داده است وارد کنید'
+        description: 'شناسه فایل (file_id) را وارد کنید'
         required: true
+        default: ''
         type: string
       part_size_mb:
         description: 'حداکثر حجم هر پارت (مگابایت) - پیشفرض 80'
@@ -14,179 +15,43 @@ on:
         type: string
 
 jobs:
-  download-and-process:
+  download:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Create downloads directory
+      - uses: actions/checkout@v4
+      
+      - name: Create downloads folder
         run: mkdir -p downloads
-
-      - name: Install dependencies
-        run: sudo apt-get install -y jq curl
-
-      - name: Download file using Bot API with file_id
+      
+      - name: Download file using Bot API
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           FILE_ID="${{ github.event.inputs.file_id }}"
-          PART_SIZE="${{ github.event.inputs.part_size_mb }}"
           
-          echo "File ID: $FILE_ID"
+          echo "Downloading file with ID: $FILE_ID"
           
-          # Step 1: Get file path from Telegram using getFile method
-          FILE_INFO=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${FILE_ID}")
-          echo "File info response: $FILE_INFO"
+          # Get file path
+          RESPONSE=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${FILE_ID}")
+          echo "API Response: $RESPONSE"
           
-          FILE_PATH=$(echo "$FILE_INFO" | jq -r '.result.file_path')
+          FILE_PATH=$(echo "$RESPONSE" | jq -r '.result.file_path')
           
-          if [[ -z "$FILE_PATH" || "$FILE_PATH" == "null" ]]; then
-            echo "ERROR: Failed to get file path from Telegram. Response: $FILE_INFO"
+          if [ "$FILE_PATH" = "null" ] || [ -z "$FILE_PATH" ]; then
+            echo "Error: Invalid file_id or bot cannot access this file"
             exit 1
           fi
           
-          # Step 2: Download the file
-          DOWNLOAD_URL="https://api.telegram.org/file/bot${BOT_TOKEN}/${FILE_PATH}"
+          # Download the file
+          curl -L -o "downloads/$(basename "$FILE_PATH")" "https://api.telegram.org/file/bot${BOT_TOKEN}/${FILE_PATH}"
           
-          cd downloads
-          FILENAME=$(basename "$FILE_PATH")
-          echo "Downloading from: $DOWNLOAD_URL"
-          echo "Filename: $FILENAME"
-          
-          curl -L -o "$FILENAME" "$DOWNLOAD_URL"
-          
-          # Check if download was successful
-          if [[ ! -s "$FILENAME" ]]; then
-            echo "ERROR: Download failed or file is empty."
-            exit 1
-          fi
-          
-          echo "Downloaded: $FILENAME"
-          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
-          
-          # Calculate file size
-          FILE_SIZE_BYTES=$(stat -c%s "$FILENAME")
-          FILE_SIZE_MB=$((FILE_SIZE_BYTES / 1024 / 1024))
-          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
-          cd ..
-
-      - name: Split large file into parts (if needed)
-        if: env.FILE_SIZE_MB > 90
-        run: |
-          cd downloads
-          PART_SIZE="${{ github.event.inputs.part_size_mb }}M"
-          BASE_NAME="${{ env.FILE_NAME }}"
-          
-          split -d -a 3 -b "$PART_SIZE" "$BASE_NAME" "${BASE_NAME}.part"
-          rm "$BASE_NAME"
-          
-          echo "Created parts:"
-          ls -la ${BASE_NAME}.part*
-          cd ..
-
-      - name: Commit and push all files
+          echo "Download completed!"
+          ls -la downloads/
+      
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/
-          
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git commit -m "Add downloaded file(s) from Telegram"
-            git push
-            echo "Successfully committed and pushed."
-          else
-            echo "No file to commit."
-            exit 1
-          fi      # For the direct approach to work automatically, we need the bot to be able to fetch the message by ID.
-          # Telegram Bot API does not support fetching a specific message by ID from a chat where the bot is a member unless it has the message in its updates.
-          # A robust solution involves using a small proxy or having the user forward the message to the bot.
-          
-          # Given the constraints, the most reliable method in pure GitHub Actions is:
-          # 1. User forwards the target message to the bot.
-          # 2. Bot receives it, and we get the file_id from its update.
-          # We will implement a helper script to fetch the latest file_id from the bot's updates.
-          
-          # Let's download the last 50 updates to find our file
-          UPDATES=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?limit=50")
-          
-          # Extract the file_id of the most recent document/video/photo
-          # This assumes the user just forwarded the file to the bot
-          FILE_ID=$(echo "$UPDATES" | jq -r '.result[-1].message.document.file_id // .result[-1].message.video.file_id // .result[-1].message.photo[-1].file_id // empty')
-          
-          if [[ -z "$FILE_ID" ]]; then
-            echo "ERROR: No file_id found. Please forward the target message to your bot (@...), then run this workflow again."
-            echo "The bot token is: $BOT_TOKEN (keep this secret)"
-            echo "Your bot's username: @... (Get it from BotFather)"
-            exit 1
-          fi
-          
-          echo "Found File ID: $FILE_ID"
-          
-          # 3. Get the file path from the file_id
-          FILE_INFO=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${FILE_ID}")
-          FILE_PATH=$(echo "$FILE_INFO" | jq -r '.result.file_path')
-          
-          if [[ -z "$FILE_PATH" || "$FILE_PATH" == "null" ]]; then
-            echo "ERROR: Failed to get file path from Telegram. Response: $FILE_INFO"
-            exit 1
-          fi
-          
-          # 4. Construct the direct download link (valid for 1 hour)
-          DOWNLOAD_URL="https://api.telegram.org/file/bot${BOT_TOKEN}/${FILE_PATH}"
-          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
-          echo "FILE_PATH=$FILE_PATH" >> $GITHUB_ENV
-
-      - name: Download the file
-        run: |
-          cd downloads
-          # Extract filename from the URL or path, use a default if none
-          FILENAME=$(basename "${{ env.FILE_PATH }}" | sed 's/[^a-zA-Z0-9._-]//g')
-          if [[ -z "$FILENAME" ]]; then
-            FILENAME="telegram_file"
-          fi
-          
-          # Download the file using curl
-          curl -L -o "$FILENAME" "${{ env.DOWNLOAD_URL }}"
-          
-          # Check if download was successful
-          if [[ $? -ne 0 ]] || [[ ! -s "$FILENAME" ]]; then
-            echo "ERROR: Download failed."
-            exit 1
-          fi
-          
-          echo "Downloaded: $FILENAME"
-          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
-          
-          # Calculate file size
-          FILE_SIZE_BYTES=$(stat -c%s "$FILENAME")
-          FILE_SIZE_MB=$((FILE_SIZE_BYTES / 1024 / 1024))
-          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
-
-      - name: Split large file into parts (if needed)
-        if: env.FILE_SIZE_MB > 90
-        run: |
-          cd downloads
-          PART_SIZE="${{ github.event.inputs.part_size_mb }}M"
-          BASE_NAME="${{ env.FILE_NAME }}"
-          
-          split -d -a 3 -b "$PART_SIZE" "$BASE_NAME" "${BASE_NAME}.part"
-          rm "$BASE_NAME"
-          
-          echo "Created parts:"
-          ls -la ${BASE_NAME}.part*
-
-      - name: Commit and push all files
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
-          
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git commit -m "Add downloaded file(s) from Telegram"
-            git push
-            echo "Successfully committed and pushed."
-          else
-            echo "No file to commit."
-            exit 1
-          fi
+          git commit -m "Add downloaded file from Telegram" || echo "No changes to commit"
+          git push
