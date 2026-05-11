@@ -1,14 +1,14 @@
-name: Telegram File Downloader (نسخه نهایی با API رسمی)
+    name: Telegram File Downloader (نسخه Bot API نهایی)
 
 on:
   workflow_dispatch:
     inputs:
-      tg_link:
-        description: 'لینک پیام تلگرام را اینجا قرار دهید'
+      file_id:
+        description: 'شناسه فایل (file_id) را که بات به شما داده است وارد کنید'
         required: true
         type: string
       part_size_mb:
-        description: 'حداکثر حجم هر پارت به مگابایت (پیشفرض 80)'
+        description: 'حداکثر حجم هر پارت (مگابایت) - پیشفرض 80'
         required: false
         default: '80'
         type: string
@@ -21,47 +21,84 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create downloads directory
-        run: |
-          mkdir -p downloads
-          rm -rf downloads/*
+        run: mkdir -p downloads
 
       - name: Install dependencies
         run: sudo apt-get install -y jq curl
 
-      - name: Extract IDs and get direct download link via Bot API
-        id: get_link
+      - name: Download file using Bot API with file_id
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
-          # 1. Extract identifiers from the Telegram link
-          LINK="${{ github.event.inputs.tg_link }}"
-          # Clean the link and extract chat identifier and message ID
-          CLEAN_LINK=$(echo "$LINK" | sed 's/\/[0-9]*$//' | sed 's/^.*t\.me\///')
-          CHAT_ID=$(echo "$CLEAN_LINK" | cut -d'/' -f1)
-          MESSAGE_ID=$(echo "$LINK" | grep -oE '[0-9]+$')
+          FILE_ID="${{ github.event.inputs.file_id }}"
+          PART_SIZE="${{ github.event.inputs.part_size_mb }}"
           
-          # Workaround for private chats/groups: Use @username as chat_id
-          if [[ "$CHAT_ID" =~ ^[a-zA-Z_] ]]; then
-            CHAT_ID="@$CHAT_ID"
+          echo "File ID: $FILE_ID"
+          
+          # Step 1: Get file path from Telegram using getFile method
+          FILE_INFO=$(curl -s "https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${FILE_ID}")
+          echo "File info response: $FILE_INFO"
+          
+          FILE_PATH=$(echo "$FILE_INFO" | jq -r '.result.file_path')
+          
+          if [[ -z "$FILE_PATH" || "$FILE_PATH" == "null" ]]; then
+            echo "ERROR: Failed to get file path from Telegram. Response: $FILE_INFO"
+            exit 1
           fi
           
-          echo "Chat ID: $CHAT_ID"
-          echo "Message ID: $MESSAGE_ID"
+          # Step 2: Download the file
+          DOWNLOAD_URL="https://api.telegram.org/file/bot${BOT_TOKEN}/${FILE_PATH}"
+          
+          cd downloads
+          FILENAME=$(basename "$FILE_PATH")
+          echo "Downloading from: $DOWNLOAD_URL"
+          echo "Filename: $FILENAME"
+          
+          curl -L -o "$FILENAME" "$DOWNLOAD_URL"
+          
+          # Check if download was successful
+          if [[ ! -s "$FILENAME" ]]; then
+            echo "ERROR: Download failed or file is empty."
+            exit 1
+          fi
+          
+          echo "Downloaded: $FILENAME"
+          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
+          
+          # Calculate file size
+          FILE_SIZE_BYTES=$(stat -c%s "$FILENAME")
+          FILE_SIZE_MB=$((FILE_SIZE_BYTES / 1024 / 1024))
+          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
+          cd ..
 
-          # 2. Get the message details from Telegram Bot API to find the file_id
-          API_URL="https://api.telegram.org/bot${BOT_TOKEN}/getUpdates"
+      - name: Split large file into parts (if needed)
+        if: env.FILE_SIZE_MB > 90
+        run: |
+          cd downloads
+          PART_SIZE="${{ github.event.inputs.part_size_mb }}M"
+          BASE_NAME="${{ env.FILE_NAME }}"
           
-          # Wait a moment for the bot to have received the message (or forward it)
-          # Since getting a specific message by ID is not direct, we use a simpler approach:
-          # We forward the message to the bot. For this to work, the user needs to send the message to the bot.
-          # Alternative: Use getUpdates and find the message. This is complex in bash.
-          # Let's use a 2-step process documented in the description.
+          split -d -a 3 -b "$PART_SIZE" "$BASE_NAME" "${BASE_NAME}.part"
+          rm "$BASE_NAME"
           
-          # SIMPLIFIED APPROACH (User sends file/forward to bot):
-          # The bot will have a file_id in its updates. We will fetch it.
-          # This is a placeholder. The user MUST interact with the bot first.
+          echo "Created parts:"
+          ls -la ${BASE_NAME}.part*
+          cd ..
+
+      - name: Commit and push all files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
           
-          # For the direct approach to work automatically, we need the bot to be able to fetch the message by ID.
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git commit -m "Add downloaded file(s) from Telegram"
+            git push
+            echo "Successfully committed and pushed."
+          else
+            echo "No file to commit."
+            exit 1
+          fi      # For the direct approach to work automatically, we need the bot to be able to fetch the message by ID.
           # Telegram Bot API does not support fetching a specific message by ID from a chat where the bot is a member unless it has the message in its updates.
           # A robust solution involves using a small proxy or having the user forward the message to the bot.
           
