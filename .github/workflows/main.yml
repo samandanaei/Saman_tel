@@ -1,0 +1,46 @@
+# نام این Workflow
+name: Telegram File Downloader
+
+#定义了触发方式: 手动触发 (workflow_dispatch)
+on:
+  workflow_dispatch:
+    inputs:
+      tg_link:
+        description: 'لینک پیام تلگرام را اینجا قرار دهید'
+        required: true
+        type: string
+
+# اینجا Jobs تعریف می‌شوند. هر Job شامل یک سری Step است.
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: خروجی مخزن را در محیط اجرا بارگذاری می‌کند
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: ابزارهای مورد نیاز را نصب می‌کند (yt-dlp برای دانلود، unzip برای فایل‌های فشرده)
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+          pip install yt-dlp
+
+      # Step 3: لینک تلگرام را به لینک مستقیم دانلود تبدیل می‌کند و فایل را می‌گیرد!
+      # اینجا از قدرت yt-dlp استفاده می‌شود که می‌تواند لینک‌های تلگرام را پردازش کند.
+      - name: Download file from Telegram
+        run: |
+          yt-dlp --no-playlist -o "downloads/%(title)s.%(ext)s" "${{ github.event.inputs.tg_link }}"
+
+      # Step 4: فایل دانلود شده را به مخزن اضافه و ذخیره (commit) می‌کند
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git commit -m "Add downloaded file from Telegram"
+            git push
+          else
+            echo "No new file to commit."
+          fi
