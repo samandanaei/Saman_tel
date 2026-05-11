@@ -1,0 +1,97 @@
+name: 📥 TG Downloader (بدون نیاز به فعالسازی)
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_link:
+        description: '🔗 لینک پست تلگرام (مثال: https://t.me/username/123)'
+        required: true
+        type: string
+      part_size_mb:
+        description: 'حداکثر حجم هر پارت (مگابایت) - پیشفرض 80'
+        required: false
+        default: '80'
+        type: string
+
+jobs:
+  tg-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Create downloads folder
+        run: mkdir -p downloads
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl wget
+          pip install yt-dlp
+
+      - name: Download from Telegram using yt-dlp
+        id: download
+        run: |
+          LINK="${{ github.event.inputs.telegram_link }}"
+          echo "Downloading from: $LINK"
+          
+          # Try yt-dlp first (works for many Telegram links)
+          yt-dlp --no-playlist -o "downloads/%(title)s.%(ext)s" "$LINK"
+          
+          # Check if anything was downloaded
+          cd downloads
+          FILE_COUNT=$(ls -1 2>/dev/null | wc -l)
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: yt-dlp failed to download. Trying alternative method..."
+            # Alternative: Extract using Telegram Bot API if yt-dlp fails
+            echo "This link might be private or the file is not accessible."
+            exit 1
+          fi
+          
+          # Get downloaded file name and size
+          FILE_NAME=$(ls -1 | head -n 1)
+          FILE_SIZE=$(stat -c%s "$FILE_NAME")
+          FILE_SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+          
+          echo "Downloaded: $FILE_NAME"
+          echo "Size: $FILE_SIZE_MB MB"
+          echo "FILE_NAME=$FILE_NAME" >> $GITHUB_ENV
+          echo "FILE_SIZE_MB=$FILE_SIZE_MB" >> $GITHUB_ENV
+          cd ..
+
+      - name: Split large file into parts
+        if: env.FILE_SIZE_MB > 90
+        run: |
+          cd downloads
+          PART_SIZE="${{ github.event.inputs.part_size_mb }}M"
+          BASE_NAME="${{ env.FILE_NAME }}"
+          
+          # Split file into smaller parts
+          split -d -a 3 -b "$PART_SIZE" "$BASE_NAME" "${BASE_NAME}.part"
+          rm "$BASE_NAME"
+          
+          echo "File splitted into parts:"
+          ls -la ${BASE_NAME}.part*
+          cd ..
+
+      - name: Commit and push downloaded files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          
+          if git diff --staged --quiet; then
+            echo "No files to commit"
+          else
+            git commit -m "Download from Telegram: ${{ github.event.inputs.telegram_link }}"
+            git push
+            echo "Files successfully committed and pushed"
+          fi
