@@ -1,7 +1,5 @@
-# نام این Workflow
 name: Telegram File Downloader
 
-#定义了触发方式: 手动触发 (workflow_dispatch)
 on:
   workflow_dispatch:
     inputs:
@@ -10,37 +8,51 @@ on:
         required: true
         type: string
 
-# اینجا Jobs تعریف می‌شوند. هر Job شامل یک سری Step است.
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      # Step 1: خروجی مخزن را در محیط اجرا بارگذاری می‌کند
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: ابزارهای مورد نیاز را نصب می‌کند (yt-dlp برای دانلود، unzip برای فایل‌های فشرده)
+      - name: Create downloads directory
+        run: mkdir -p downloads
+
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
           pip install yt-dlp
 
-      # Step 3: لینک تلگرام را به لینک مستقیم دانلود تبدیل می‌کند و فایل را می‌گیرد!
-      # اینجا از قدرت yt-dlp استفاده می‌شود که می‌تواند لینک‌های تلگرام را پردازش کند.
+      # STEP جدید و دقیق‌تر برای دانلود با نام ثابت و بررسی خطا
       - name: Download file from Telegram
         run: |
-          yt-dlp --no-playlist -o "downloads/%(title)s.%(ext)s" "${{ github.event.inputs.tg_link }}"
+          # دانلود با یک نام ثابت (file_to_download) برای جلوگیری از پیچیدگی
+          yt-dlp --no-playlist -o "downloads/file_to_download.%(ext)s" "${{ github.event.inputs.tg_link }}"
+          
+          # بررسی می‌کند که آیا فایلی دانلود شده است یا خیر
+          if [ -z "$(ls -A downloads 2>/dev/null)" ]; then
+            echo "ERROR: No file was downloaded from the provided link!"
+            exit 1
+          else
+            echo "Download successful. Files in downloads folder:"
+            ls -la downloads/
+          fi
 
-      # Step 4: فایل دانلود شده را به مخزن اضافه و ذخیره (commit) می‌کند
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # اضافه کردن هر چیزی که در پوشه downloads است
           git add downloads/
+          
+          # اگر تغییری وجود داشت، commit و push کن
           if [[ -n "$(git status --porcelain)" ]]; then
             git commit -m "Add downloaded file from Telegram"
             git push
+            echo "Files successfully committed and pushed to the repository."
           else
-            echo "No new file to commit."
+            echo "No new file to commit. The downloads folder might be empty."
+            exit 1
           fi
